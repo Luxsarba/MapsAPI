@@ -37,7 +37,8 @@ class MapApp(QMainWindow):
 
         self.label = QLabel(self)
         self.label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.label.mousePressEvent = self.clear_focus_on_click
+        self.label.setScaledContents(False)
+        self.label.mousePressEvent = self.handle_map_click
 
         self.toggle_button = QPushButton("Сменить тему", self)
         self.toggle_button.clicked.connect(self.toggle_map_theme)
@@ -82,6 +83,66 @@ class MapApp(QMainWindow):
         self.setCentralWidget(container)
 
         self.update_map()
+
+    def handle_map_click(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            img_width, img_height = 600, 450
+
+            label_width = self.label.width()
+            label_height = self.label.height()
+
+            scale_x = label_width / img_width
+            scale_y = label_height / img_height
+
+            if scale_x * img_height <= label_height:
+                scale = scale_x
+                offset_x = 0
+                offset_y = (label_height - img_height * scale) / 2
+            else:
+                scale = scale_y
+                offset_x = (label_width - img_width * scale) / 2
+                offset_y = 0
+
+            click_x = (event.pos().x() - offset_x) / scale
+            click_y = (event.pos().y() - offset_y) / scale
+
+            if 0 <= click_x <= img_width and 0 <= click_y <= img_height:
+                norm_x = (click_x / img_width) - 0.5
+                norm_y = 0.5 - (click_y / img_height)
+
+                move_step = get_move_step(self.zoom)
+                lon = self.coords[0] + norm_x * 360 / (2 ** (self.zoom - 1))
+                lat = self.coords[1] + norm_y * 180 / (2 ** (self.zoom - 1))
+
+                lon = max(-180.0, min(180.0, lon))
+                lat = max(-85.0, min(85.0, lat))
+
+                self.reverse_geocode(lon, lat)
+
+    def reverse_geocode(self, lon, lat):
+        url = "https://geocode-maps.yandex.ru/1.x/"
+        params = {
+            "apikey": GEOCODER_API_KEY,
+            "geocode": f"{lon},{lat}",
+            "format": "json"
+        }
+
+        try:
+            response = requests.get(url, params=params)
+            response.raise_for_status()
+            json_data = response.json()
+            feature = json_data["response"]["GeoObjectCollection"]["featureMember"]
+            if not feature:
+                print("Ничего не найдено.")
+                return
+
+            geo_obj = feature[0]["GeoObject"]
+            self.last_geo_data = geo_obj["metaDataProperty"]["GeocoderMetaData"]
+            self.point = [lon, lat]
+            self.update_address_display()
+            self.update_map()
+        except requests.exceptions.RequestException as e:
+            print(f"Ошибка при обратном геокодинге: {e}")
 
     def update_map(self):
         map_data = self.get_map(self.coords, self.zoom, self.point)
@@ -209,9 +270,6 @@ class MapApp(QMainWindow):
         self.address_output.clear()
         self.last_geo_data = None
         self.update_map()
-
-    def clear_focus_on_click(self, event):
-        QApplication.focusWidget().clearFocus()
 
 
 if __name__ == "__main__":
