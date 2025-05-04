@@ -9,10 +9,12 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtGui import QPixmap
 from PyQt6.QtCore import Qt
 from io import BytesIO
+import math
 
 load_dotenv()
 STATIC_MAPS_API_KEY = os.getenv("STATIC_MAPS_API_KEY")
 GEOCODER_API_KEY = os.getenv("GEOCODER_API_KEY")
+SEARCH_API_KEY = os.getenv("GEOSEARCH_API_KEY")
 
 ZOOM = 10
 MIN_ZOOM = 1
@@ -21,6 +23,19 @@ MAX_ZOOM = 17
 
 def get_move_step(zoom):
     return 180 / (2 ** zoom)
+
+
+def haversine(lon1, lat1, lon2, lat2):
+    R = 6371000
+    phi1 = math.radians(lat1)
+    phi2 = math.radians(lat2)
+    delta_phi = math.radians(lat2 - lat1)
+    delta_lambda = math.radians(lon2 - lon1)
+
+    a = math.sin(delta_phi / 2) ** 2 + \
+        math.cos(phi1) * math.cos(phi2) * math.sin(delta_lambda / 2) ** 2
+    c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+    return R * c
 
 
 class MapApp(QMainWindow):
@@ -85,39 +100,83 @@ class MapApp(QMainWindow):
         self.update_map()
 
     def handle_map_click(self, event):
-        if event.button() == Qt.MouseButton.LeftButton:
-            img_width, img_height = 600, 450
+        img_width, img_height = 600, 450
+        label_width = self.label.width()
+        label_height = self.label.height()
 
-            label_width = self.label.width()
-            label_height = self.label.height()
+        scale_x = label_width / img_width
+        scale_y = label_height / img_height
 
-            scale_x = label_width / img_width
-            scale_y = label_height / img_height
+        if scale_x * img_height <= label_height:
+            scale = scale_x
+            offset_x = 0
+            offset_y = (label_height - img_height * scale) / 2
+        else:
+            scale = scale_y
+            offset_x = (label_width - img_width * scale) / 2
+            offset_y = 0
 
-            if scale_x * img_height <= label_height:
-                scale = scale_x
-                offset_x = 0
-                offset_y = (label_height - img_height * scale) / 2
-            else:
-                scale = scale_y
-                offset_x = (label_width - img_width * scale) / 2
-                offset_y = 0
+        click_x = (event.pos().x() - offset_x) / scale
+        click_y = (event.pos().y() - offset_y) / scale
 
-            click_x = (event.pos().x() - offset_x) / scale
-            click_y = (event.pos().y() - offset_y) / scale
+        if 0 <= click_x <= img_width and 0 <= click_y <= img_height:
+            norm_x = (click_x / img_width) - 0.5
+            norm_y = 0.5 - (click_y / img_height)
 
-            if 0 <= click_x <= img_width and 0 <= click_y <= img_height:
-                norm_x = (click_x / img_width) - 0.5
-                norm_y = 0.5 - (click_y / img_height)
+            move_step = get_move_step(self.zoom)
+            lon = self.coords[0] + norm_x * 360 / (2 ** (self.zoom - 1))
+            lat = self.coords[1] + norm_y * 180 / (2 ** (self.zoom - 1))
 
-                move_step = get_move_step(self.zoom)
-                lon = self.coords[0] + norm_x * 360 / (2 ** (self.zoom - 1))
-                lat = self.coords[1] + norm_y * 180 / (2 ** (self.zoom - 1))
+            lon = max(-180.0, min(180.0, lon))
+            lat = max(-85.0, min(85.0, lat))
 
-                lon = max(-180.0, min(180.0, lon))
-                lat = max(-85.0, min(85.0, lat))
-
+            if event.button() == Qt.MouseButton.LeftButton:
                 self.reverse_geocode(lon, lat)
+            elif event.button() == Qt.MouseButton.RightButton:
+                self.search_organization(lon, lat, self.search_input.text())
+
+    def search_organization(self, lon, lat, text):
+        self.reset_search_point()
+        url = "https://search-maps.yandex.ru/v1/"
+        params = {
+            "apikey": SEARCH_API_KEY,
+            "text": text,
+            "lang": "ru_RU",
+            "ll": f"{lon},{lat}",
+            "type": "biz",
+            "results": 1
+        }
+
+        try:
+            response = requests.get(url, params=params)
+            response.raise_for_status()
+            json_response = response.json()
+
+            if not json_response.get("features"):
+                print("Организации не найдены.")
+                return
+
+            organization = json_response["features"][0]
+            org_coords = organization["geometry"]["coordinates"]
+            org_lon, org_lat = org_coords[0], org_coords[1]
+
+            distance = haversine(lon, lat, org_lon, org_lat)
+            if distance > 50:
+                print("Нет организаций в радиусе 50 метров.")
+                return
+
+            self.last_geo_data = {
+                "text": organization["properties"]["CompanyMetaData"]["name"],
+                "Address": {"postal_code": ""}
+            }
+            self.point = [org_lon, org_lat]
+            self.address_output.setText(
+                f"{organization['properties']['CompanyMetaData']['name']}, "
+                f"{organization['properties']['CompanyMetaData']['address']}"
+            )
+            self.update_map()
+        except requests.exceptions.RequestException as e:
+            print(f"Ошибка при поиске организации: {e}")
 
     def reverse_geocode(self, lon, lat):
         url = "https://geocode-maps.yandex.ru/1.x/"
